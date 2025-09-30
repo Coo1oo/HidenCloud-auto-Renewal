@@ -1,0 +1,121 @@
+name: HidenCloud多账号自动续期
+
+on:
+  # 定时运行 - 每天上午9点（UTC时间1点）
+  schedule:
+    - cron: '0 1 * * *'
+  
+  # 手动触发
+  workflow_dispatch:
+
+jobs:
+  auto-renewal:
+    runs-on: ubuntu-latest
+    
+    # 授予工作流写入仓库内容和管理Actions的权限
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install playwright>=1.40.0 python-dotenv>=1.0.0
+        # 安装 Playwright 浏览器
+        playwright install chromium
+        # 安装系统依赖
+        playwright install-deps chromium
+    
+    - name: Run multi-account auto renewal script
+      env:
+        HIDENCLOUD_ACCOUNTS: ${{ secrets.HIDENCLOUD_ACCOUNTS }}
+      run: |
+        python main.py
+    
+    - name: Upload screenshots
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: screenshots-${{ github.run_id }}
+        path: "*.png"
+        retention-days: 3
+    
+    - name: Commit and push README.md
+      if: always()
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add README.md
+        git diff --staged --quiet || git commit -m "Update README.md with latest run results [$(date +'%Y-%m-%d %H:%M:%S')]"
+        git push
+    
+    - name: Send Telegram notification
+      if: always() && env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        # 提取README.md中的关键信息
+        if [ -f "README.md" ]; then
+          # 统计成功和失败的服务器数量
+          SUCCESS_COUNT=$(grep -c "✅Success" README.md || echo "0")
+          UNEXPIRED_COUNT=$(grep -c "ℹ️Unexpired" README.md || echo "0")
+          FAILED_COUNT=$(grep -c "❌" README.md || echo "0")
+          TOTAL_COUNT=$((SUCCESS_COUNT + UNEXPIRED_COUNT + FAILED_COUNT))
+          
+          # 提取账号数量
+          ACCOUNT_COUNT=$(grep -c "### 账号:" README.md || echo "0")
+        else
+          SUCCESS_COUNT="0"
+          UNEXPIRED_COUNT="0"
+          FAILED_COUNT="0"
+          TOTAL_COUNT="0"
+          ACCOUNT_COUNT="0"
+        fi
+        
+        # 构建通知消息
+        MESSAGE="☁️ HidenCloud多账号续期通知
+        📅 执行时间：$(date +'%Y-%m-%d %H:%M:%S')
+        
+        👥 处理账号数：${ACCOUNT_COUNT}
+        🖥️ 服务器总数：${TOTAL_COUNT}
+        
+        📊 执行结果：
+        ✅ 续期成功：${SUCCESS_COUNT}
+        ℹ️ 未到期限：${UNEXPIRED_COUNT}
+        ❌ 处理失败：${FAILED_COUNT}
+        
+        📋 详细信息：
+        🔗 [查看运行日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+        📸 [下载截图](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts)
+        📄 [查看完整报告](https://github.com/${{ github.repository }}/blob/main/README.md)"
+        
+        # 发送Telegram消息
+        curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+          -d chat_id="${TELEGRAM_CHAT_ID}" \
+          -d text="${MESSAGE}" \
+          -d parse_mode="Markdown"
+    
+    - name: Telegram通知跳过提示
+      if: always() && (env.TELEGRAM_BOT_TOKEN == '' || env.TELEGRAM_CHAT_ID == '')
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: echo "未配置Telegram变量，跳过通知"
+
+    - name: Delete old workflow runs
+      uses: MajorScruffy/delete-old-workflow-runs@v0.3.0
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      with:
+        repository: ${{ github.repository }}
+        older-than-seconds: 172800  # 删除2天前的记录
